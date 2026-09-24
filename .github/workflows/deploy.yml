@@ -19,7 +19,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies
@@ -27,11 +27,6 @@ jobs:
 
       - name: Build site
         run: npm run build
-
-      # ← Insert this new step to create a CNAME file
-      - name: Create CNAME for custom domain
-        run: |
-          echo "brainfuck.hanzpo.com" > dist/CNAME
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

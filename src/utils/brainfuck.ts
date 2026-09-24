@@ -163,8 +163,9 @@ export class BrainfuckInterpreter {
     }
   }
 
-  // Runs until finished, paused, or halted, calling onUpdate each time it yields to the UI
-  async run(onUpdate?: () => void) {
+  // Runs until finished, paused, or halted, calling onUpdate each time it yields to the UI.
+  // getDelay is read every step so speed changes apply mid-run; 0 runs as fast as possible.
+  async run(onUpdate?: () => void, getDelay: () => number = () => 0) {
     this.isPaused = false;
     // A loop is already active (e.g. waiting on input); un-pausing lets it continue
     if (this.isBusy) return;
@@ -172,6 +173,14 @@ export class BrainfuckInterpreter {
     this.isBusy = true;
     try {
       while (!this.isDone && !this.isPaused) {
+        const delay = getDelay();
+        if (delay > 0) {
+          await this.exec();
+          onUpdate?.();
+          await sleep(delay);
+          continue;
+        }
+
         const sliceEnd = performance.now() + TIME_SLICE_MS;
         while (!this.isDone && !this.isPaused && performance.now() < sliceEnd) {
           // Check the clock every 1000 instructions to keep the hot loop cheap
@@ -184,7 +193,7 @@ export class BrainfuckInterpreter {
           }
         }
         onUpdate?.();
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        await sleep(0);
       }
     } finally {
       this.isBusy = false;
@@ -199,6 +208,10 @@ export class BrainfuckInterpreter {
   halt() {
     this.isHalted = true;
   }
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function describePosition(program: string, index: number): string {

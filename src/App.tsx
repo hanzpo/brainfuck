@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import { TopBar } from './components/TopBar';
 import { CodeEditor } from './components/CodeEditor';
 import Terminal from './components/Terminal';
@@ -10,6 +10,15 @@ import type { BrainfuckState } from './utils/brainfuck';
 import { Play, Pause, RotateCcw, StepForward } from 'lucide-react';
 
 const STORAGE_KEY = 'brainfuck-code';
+
+// Delay between instructions when running, in milliseconds
+const SPEEDS = [
+  { label: 'Slow', delay: 200 },
+  { label: 'Medium', delay: 50 },
+  { label: 'Fast', delay: 5 },
+  { label: 'Instant', delay: 0 },
+];
+const DEFAULT_SPEED = 5;
 
 // Default Hello World program in Brainfuck
 const DEFAULT_PROGRAM = `++++++++++[>+++++++>++++++++++>+++>+<<<<-]
@@ -30,6 +39,9 @@ function App() {
   const [interpreterState, setInterpreterState] = useState<BrainfuckState | null>(null);
   const [executionState, setExecutionState] = useState<'idle' | 'running' | 'paused'>('idle');
   const [isStepping, setIsStepping] = useState<boolean>(false);
+  const [speed, setSpeed] = useState<number>(DEFAULT_SPEED);
+  // Read by the running interpreter so speed changes apply immediately
+  const speedRef = useRef<number>(DEFAULT_SPEED);
   const terminalRef = useRef<TerminalRef>(null);
   const interpreterRef = useRef<BrainfuckInterpreter | null>(null);
 
@@ -79,7 +91,7 @@ function App() {
       if (interpreterRef.current === interpreter) {
         setInterpreterState(interpreter.getState());
       }
-    });
+    }, () => speedRef.current);
 
     // Ignore interpreters that were reset or replaced while running
     if (interpreterRef.current !== interpreter) return;
@@ -136,6 +148,12 @@ function App() {
     setInterpreterState(state);
     if (state.isDone) setExecutionState('idle');
   }, [executionState, isStepping, createInterpreter]);
+
+  const handleSpeedChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
+    const delay = Number(e.target.value);
+    speedRef.current = delay;
+    setSpeed(delay);
+  }, []);
 
   const isSessionActive = executionState !== 'idle';
 
@@ -213,6 +231,19 @@ function App() {
             <StepForward className="h-4 w-4" />
             Step
           </Button>
+
+          <label className="ml-auto flex items-center gap-2 text-sm text-muted-foreground">
+            Speed
+            <select
+              value={speed}
+              onChange={handleSpeedChange}
+              className="h-10 rounded-md border border-input bg-background px-3 text-foreground"
+            >
+              {SPEEDS.map(({ label, delay }) => (
+                <option key={delay} value={delay}>{label}</option>
+              ))}
+            </select>
+          </label>
         </div>
       </div>
       

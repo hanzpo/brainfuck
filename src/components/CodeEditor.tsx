@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { cn } from '../lib/utils';
 
 interface CodeEditorProps {
@@ -10,40 +10,46 @@ interface CodeEditorProps {
 
 const TAB_SIZE = 4;
 
-// Converts a character offset into a zero-based line and on-screen column
+// Text styles shared by the textarea and the mirror behind it, so both wrap identically
+const TEXT_STYLE = 'px-4 whitespace-pre-wrap break-all leading-[1.5rem]';
+
+// Converts a character offset into a zero-based line and column
 function getPosition(text: string, index: number) {
   const before = text.slice(0, index).split('\n');
-  let column = 0;
-  for (const char of before[before.length - 1]) {
-    column = char === '\t' ? column + TAB_SIZE - (column % TAB_SIZE) : column + 1;
-  }
-  return { line: before.length - 1, column };
+  return { line: before.length - 1, column: before[before.length - 1].length };
 }
 
 export const CodeEditor: React.FC<CodeEditorProps> = ({ value, onChange, currentCharIndex, readOnly }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const lineNumbersRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const markerRef = useRef<HTMLSpanElement>(null);
   const [cursorLine, setCursorLine] = useState<number>(0);
-  const [scroll, setScroll] = useState({ top: 0, left: 0 });
 
-  const lineCount = value.split('\n').length;
+  const lines = value.split('\n');
   const charPos = currentCharIndex !== undefined && currentCharIndex < value.length
     ? getPosition(value, currentCharIndex)
     : null;
+
+  // Scroll to keep the executing instruction visible
+  useEffect(() => {
+    const container = scrollRef.current;
+    const marker = markerRef.current;
+    if (!container || !marker) return;
+
+    const margin = 24;
+    const containerRect = container.getBoundingClientRect();
+    const markerRect = marker.getBoundingClientRect();
+    if (markerRect.top < containerRect.top + margin) {
+      container.scrollTop -= containerRect.top + margin - markerRect.top;
+    } else if (markerRect.bottom > containerRect.bottom - margin) {
+      container.scrollTop += markerRect.bottom - (containerRect.bottom - margin);
+    }
+  }, [currentCharIndex]);
 
   // Track cursor position for editor line highlighting
   const handleSelect = (e: React.SyntheticEvent<HTMLTextAreaElement>) => {
     const textarea = e.currentTarget;
     setCursorLine(getPosition(textarea.value, textarea.selectionStart).line);
-  };
-
-  // Keep line numbers and overlays aligned with the textarea's scroll position
-  const handleScroll = (e: React.UIEvent<HTMLTextAreaElement>) => {
-    const { scrollTop, scrollLeft } = e.currentTarget;
-    if (lineNumbersRef.current) {
-      lineNumbersRef.current.scrollTop = scrollTop;
-    }
-    setScroll({ top: scrollTop, left: scrollLeft });
   };
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -68,56 +74,60 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({ value, onChange, current
   };
 
   return (
-    <div className="flex h-full bg-card border rounded-md overflow-hidden">
-      <div
-        ref={lineNumbersRef}
-        className="flex-shrink-0 select-none bg-muted text-muted-foreground text-sm font-mono p-4 pr-2 overflow-y-hidden"
-        style={{ minHeight: 0 }}
-      >
-        {Array.from({ length: lineCount }, (_, i) => (
-          <div
-            key={i}
-            className={cn(
-              "h-[1.5rem] pr-2 text-right transition-colors",
-              cursorLine === i && "text-foreground font-semibold",
-              charPos?.line === i && "text-yellow-500"
-            )}
-          >
-            {i + 1}
+    <div
+      ref={scrollRef}
+      className="h-full bg-card border rounded-md overflow-y-auto font-mono text-sm"
+      style={{ tabSize: TAB_SIZE }}
+    >
+      <div className="relative min-h-full py-4">
+        {/* Gutter background */}
+        <div className="absolute inset-y-0 left-0 w-12 bg-muted" />
+
+        {/* Mirror of the text: sizes each row (so line numbers follow wrapping) and draws highlights */}
+        {lines.map((line, i) => (
+          <div key={i} className="relative flex" aria-hidden>
+            <div
+              className={cn(
+                "w-12 flex-shrink-0 pr-3 text-right leading-[1.5rem] select-none text-muted-foreground transition-colors",
+                cursorLine === i && "text-foreground font-semibold",
+                charPos?.line === i && "text-yellow-500"
+              )}
+            >
+              {i + 1}
+            </div>
+            <div
+              className={cn(
+                TEXT_STYLE,
+                "flex-1 min-w-0 min-h-[1.5rem] text-transparent",
+                cursorLine === i && "bg-accent/10 shadow-[inset_2px_0_0_var(--color-accent)]"
+              )}
+            >
+              {charPos?.line === i ? (
+                <>
+                  {line.slice(0, charPos.column)}
+                  <span ref={markerRef} className="bg-red-500/40 animate-pulse">
+                    {line[charPos.column]}
+                  </span>
+                  {line.slice(charPos.column + 1)}
+                </>
+              ) : (
+                line
+              )}
+            </div>
           </div>
         ))}
-      </div>
-      <div className="relative flex-1 overflow-hidden font-mono text-sm">
-        <div
-          className="absolute left-0 right-0 h-[1.5rem] bg-accent/10 border-l-2 border-accent pointer-events-none"
-          style={{
-            top: `calc(${cursorLine * 1.5}rem + 1rem)`,
-            transform: `translateY(${-scroll.top}px)`,
-          }}
-        />
-        {charPos && (
-          <div
-            className="absolute pointer-events-none"
-            style={{
-              top: `calc(${charPos.line * 1.5}rem + 1rem)`,
-              left: `calc(${charPos.column}ch + 1rem)`,
-              transform: `translate(${-scroll.left}px, ${-scroll.top}px)`,
-            }}
-          >
-            <span className="block w-[1ch] h-[1.5rem] bg-red-500 opacity-40 animate-pulse" />
-          </div>
-        )}
+
         <textarea
           ref={textareaRef}
           value={value}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
           onSelect={handleSelect}
-          onScroll={handleScroll}
           readOnly={readOnly}
-          wrap="off"
-          className="relative z-10 w-full h-full p-4 bg-transparent resize-none outline-none overflow-auto whitespace-pre"
-          style={{ lineHeight: '1.5rem', minHeight: 0, tabSize: TAB_SIZE }}
+          className={cn(
+            TEXT_STYLE,
+            "absolute inset-y-0 left-12 right-0 py-4 bg-transparent resize-none outline-none overflow-hidden"
+          )}
           placeholder="Enter your Brainfuck code here..."
           spellCheck={false}
         />

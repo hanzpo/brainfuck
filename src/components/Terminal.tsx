@@ -1,24 +1,28 @@
 import React, { useEffect, useRef, useCallback } from 'react';
-import { Terminal as XTerm } from 'xterm';
-import { FitAddon } from 'xterm-addon-fit';
-import 'xterm/css/xterm.css';
-
-interface TerminalProps {
-  onInput?: (data: string) => void;
-}
+import { Terminal as XTerm } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import '@xterm/xterm/css/xterm.css';
 
 export interface TerminalRef {
   write: (text: string) => void;
+  error: (message: string) => void;
   clear: () => void;
   reset: () => void;
   requestInput: () => Promise<string>;
 }
 
-const Terminal = React.forwardRef<TerminalRef, TerminalProps>((props, ref) => {
+function writeBanner(xterm: XTerm) {
+  xterm.writeln('Brainfuck Terminal');
+  xterm.writeln('==================');
+  xterm.writeln('Ready for input/output...\r\n');
+}
+
+const Terminal = React.forwardRef<TerminalRef>((_props, ref) => {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
-  const fitAddonRef = useRef<FitAddon | null>(null);
   const inputBufferRef = useRef<string>('');
+  // Lines entered before the program asked for input
+  const pendingLinesRef = useRef<string[]>([]);
   const inputResolverRef = useRef<((value: string) => void) | null>(null);
 
   useEffect(() => {
@@ -38,87 +42,77 @@ const Terminal = React.forwardRef<TerminalRef, TerminalProps>((props, ref) => {
 
     const fitAddon = new FitAddon();
     xterm.loadAddon(fitAddon);
-    
+
     xterm.open(terminalRef.current);
     fitAddon.fit();
+    writeBanner(xterm);
 
-    xterm.writeln('Brainfuck Terminal');
-    xterm.writeln('==================');
-    xterm.writeln('Ready for input/output...\r\n');
-
-    // Handle terminal input
+    // Handle terminal input; pasted text arrives as one chunk, so process it per character
     xterm.onData((data) => {
-      if (data === '\r') {
-        // Enter key pressed
-        xterm.write('\r\n');
-        const input = inputBufferRef.current;
-        inputBufferRef.current = '';
-        
-        if (inputResolverRef.current) {
-          inputResolverRef.current(input);
-          inputResolverRef.current = null;
+      for (const char of data) {
+        if (char === '\r' || char === '\n') {
+          xterm.write('\r\n');
+          const line = inputBufferRef.current + '\n';
+          inputBufferRef.current = '';
+
+          const resolve = inputResolverRef.current;
+          if (resolve) {
+            inputResolverRef.current = null;
+            resolve(line);
+          } else {
+            pendingLinesRef.current.push(line);
+          }
+        } else if (char === '\x7f' || char === '\b') {
+          if (inputBufferRef.current.length > 0) {
+            inputBufferRef.current = inputBufferRef.current.slice(0, -1);
+            xterm.write('\b \b');
+          }
+        } else if (char >= ' ' && char <= '~') {
+          inputBufferRef.current += char;
+          xterm.write(char);
         }
-        
-        if (props.onInput) {
-          props.onInput(input + '\n');
-        }
-      } else if (data === '\x7f') {
-        // Backspace
-        if (inputBufferRef.current.length > 0) {
-          inputBufferRef.current = inputBufferRef.current.slice(0, -1);
-          xterm.write('\b \b');
-        }
-      } else if (data >= ' ' && data <= '~') {
-        // Printable character
-        inputBufferRef.current += data;
-        xterm.write(data);
       }
     });
 
     xtermRef.current = xterm;
-    fitAddonRef.current = fitAddon;
 
-    // Handle resize
-    const handleResize = () => {
-      if (fitAddonRef.current) {
-        fitAddonRef.current.fit();
-      }
-    };
-
-    window.addEventListener('resize', handleResize);
+    const resizeObserver = new ResizeObserver(() => fitAddon.fit());
+    resizeObserver.observe(terminalRef.current);
 
     return () => {
-      window.removeEventListener('resize', handleResize);
+      resizeObserver.disconnect();
       xterm.dispose();
+      xtermRef.current = null;
     };
-  }, [props.onInput]);
+  }, []);
 
   const write = useCallback((text: string) => {
-    if (xtermRef.current) {
-      // Replace newlines with carriage return + newline for proper terminal display
-      const formattedText = text.replace(/\n/g, '\r\n');
-      xtermRef.current.write(formattedText);
-    }
+    // Replace newlines with carriage return + newline for proper terminal display
+    xtermRef.current?.write(text.replace(/\n/g, '\r\n'));
+  }, []);
+
+  const error = useCallback((message: string) => {
+    xtermRef.current?.write(`\x1b[31m${message}\x1b[0m\r\n`);
   }, []);
 
   const clear = useCallback(() => {
-    if (xtermRef.current) {
-      xtermRef.current.clear();
-    }
+    xtermRef.current?.clear();
   }, []);
 
   const reset = useCallback(() => {
     if (xtermRef.current) {
       xtermRef.current.reset();
-      xtermRef.current.writeln('Brainfuck Terminal');
-      xtermRef.current.writeln('==================');
-      xtermRef.current.writeln('Ready for input/output...\r\n');
+      writeBanner(xtermRef.current);
     }
     inputBufferRef.current = '';
+    pendingLinesRef.current = [];
     inputResolverRef.current = null;
   }, []);
 
   const requestInput = useCallback((): Promise<string> => {
+    const pending = pendingLinesRef.current.shift();
+    if (pending !== undefined) return Promise.resolve(pending);
+    xtermRef.current?.focus();
     return new Promise((resolve) => {
       inputResolverRef.current = resolve;
     });
@@ -128,11 +122,12 @@ const Terminal = React.forwardRef<TerminalRef, TerminalProps>((props, ref) => {
     ref,
     () => ({
       write,
+      error,
       clear,
       reset,
       requestInput,
     }),
-    [write, clear, reset, requestInput]
+    [write, error, clear, reset, requestInput]
   );
 
   return (
@@ -142,4 +137,4 @@ const Terminal = React.forwardRef<TerminalRef, TerminalProps>((props, ref) => {
 
 Terminal.displayName = 'Terminal';
 
-export default Terminal; 
+export default Terminal;

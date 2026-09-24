@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { TopBar } from './components/TopBar';
 import { CodeEditor } from './components/CodeEditor';
 import Terminal from './components/Terminal';
@@ -16,24 +16,22 @@ const DEFAULT_PROGRAM = `++++++++++[>+++++++>++++++++++>+++>+<<<<-]
 >++.>+.+++++++..+++.>++.<<+++++++++++++++.
 >.+++.------.--------.>+.>.`;
 
+function loadSavedCode(): string {
+  try {
+    return localStorage.getItem(STORAGE_KEY) ?? DEFAULT_PROGRAM;
+  } catch {
+    return DEFAULT_PROGRAM;
+  }
+}
+
 function App() {
-  const [code, setCode] = useState<string>('');
+  const [code, setCode] = useState<string>(loadSavedCode);
   const [isSaved, setIsSaved] = useState<boolean>(true);
   const [interpreterState, setInterpreterState] = useState<BrainfuckState | null>(null);
   const [executionState, setExecutionState] = useState<'idle' | 'running' | 'paused'>('idle');
+  const [isStepping, setIsStepping] = useState<boolean>(false);
   const terminalRef = useRef<TerminalRef>(null);
   const interpreterRef = useRef<BrainfuckInterpreter | null>(null);
-
-  // Load saved code on mount
-  useEffect(() => {
-    const savedCode = localStorage.getItem(STORAGE_KEY);
-    if (savedCode) {
-      setCode(savedCode);
-    } else {
-      // If no saved code, use the default program
-      setCode(DEFAULT_PROGRAM);
-    }
-  }, []);
 
   // Handle code changes
   const handleCodeChange = useCallback((newCode: string) => {
@@ -43,101 +41,62 @@ function App() {
 
   // Save code to localStorage
   const handleSave = useCallback(() => {
-    localStorage.setItem(STORAGE_KEY, code);
-    setIsSaved(true);
+    try {
+      localStorage.setItem(STORAGE_KEY, code);
+      setIsSaved(true);
+    } catch {
+      terminalRef.current?.error('Could not save: browser storage is unavailable.');
+    }
   }, [code]);
 
-  // Create interpreter with terminal integration
+  // Create a fresh interpreter wired to the terminal, or report a syntax error
   const createInterpreter = useCallback(() => {
-    const interpreter = new BrainfuckInterpreter(
-      code,
-      30000,
-      (char: string) => {
-        terminalRef.current?.write(char);
-      },
-      async () => {
-        if (terminalRef.current) {
-          return await terminalRef.current.requestInput();
-        }
-        return '';
-      }
-    );
-    
-    interpreterRef.current = interpreter;
-    return interpreter;
+    interpreterRef.current?.halt();
+    interpreterRef.current = null;
+    terminalRef.current?.reset();
+
+    try {
+      const interpreter = new BrainfuckInterpreter(
+        code,
+        30000,
+        (char: string) => terminalRef.current?.write(char),
+        () => terminalRef.current?.requestInput() ?? Promise.resolve('')
+      );
+      interpreterRef.current = interpreter;
+      setInterpreterState(interpreter.getState());
+      return interpreter;
+    } catch (e) {
+      terminalRef.current?.error((e as Error).message);
+      setInterpreterState(null);
+      return null;
+    }
   }, [code]);
+
+  // Run until the program finishes or is paused
+  const runInterpreter = useCallback(async (interpreter: BrainfuckInterpreter) => {
+    setExecutionState('running');
+    await interpreter.run(() => {
+      if (interpreterRef.current === interpreter) {
+        setInterpreterState(interpreter.getState());
+      }
+    });
+
+    // Ignore interpreters that were reset or replaced while running
+    if (interpreterRef.current !== interpreter) return;
+    const state = interpreter.getState();
+    setInterpreterState(state);
+    setExecutionState(state.isDone ? 'idle' : state.isPaused ? 'paused' : 'running');
+  }, []);
 
   // Start/Resume the program
-  const handleStart = useCallback(async () => {
+  const handleStart = useCallback(() => {
     if (executionState === 'paused' && interpreterRef.current) {
-      // Resume from pause
-      setExecutionState('running');
-      
-      // Continue monitoring state
-      const updateInterval = setInterval(() => {
-        if (interpreterRef.current) {
-          const state = interpreterRef.current.getState();
-          setInterpreterState(state);
-          
-          // Check if execution has stopped
-          if (!state.isRunning) {
-            clearInterval(updateInterval);
-            if (state.isPaused) {
-              setExecutionState('paused');
-            } else {
-              setExecutionState('idle');
-            }
-          }
-        }
-      }, 50);
-      
-      await interpreterRef.current.resume();
-      
-      // Clean up after resume completes
-      clearInterval(updateInterval);
-      const finalState = interpreterRef.current.getState();
-      setInterpreterState(finalState);
-      if (!finalState.isRunning) {
-        setExecutionState('idle');
-      }
-      return;
-    }
-
-    // Start new execution only if idle
-    if (executionState === 'idle') {
-      terminalRef.current?.reset();
+      runInterpreter(interpreterRef.current);
+    } else if (executionState === 'idle') {
       const interpreter = createInterpreter();
-      setExecutionState('running');
-
-      // Update state during execution
-      const updateInterval = setInterval(() => {
-        if (interpreterRef.current) {
-          const state = interpreterRef.current.getState();
-          setInterpreterState(state);
-          
-          // Check if execution has stopped
-          if (!state.isRunning) {
-            clearInterval(updateInterval);
-            if (state.isPaused) {
-              setExecutionState('paused');
-            } else {
-              setExecutionState('idle');
-            }
-          }
-        }
-      }, 50);
-
-      await interpreter.run();
-
-      clearInterval(updateInterval);
-      setInterpreterState(interpreter.getState());
-      if (interpreter.getState().isPaused) {
-        setExecutionState('paused');
-      } else {
-        setExecutionState('idle');
-      }
+      if (interpreter) runInterpreter(interpreter);
     }
-  }, [executionState, createInterpreter]);
+  }, [executionState, createInterpreter, runInterpreter]);
 
   // Pause the program
   const handlePause = useCallback(() => {
@@ -149,56 +108,36 @@ function App() {
 
   // Reset the program
   const handleReset = useCallback(() => {
-    if (interpreterRef.current) {
-      interpreterRef.current.reset();
-      setInterpreterState(null);
-    }
+    interpreterRef.current?.halt();
+    interpreterRef.current = null;
+    setInterpreterState(null);
     terminalRef.current?.reset();
     setExecutionState('idle');
-    interpreterRef.current = null;
+    setIsStepping(false);
   }, []);
 
-  // Step through the program
+  // Step through the program, starting a paused session if none is active
   const handleStep = useCallback(async () => {
-    // If we're paused, just step without creating a new interpreter
-    if (executionState === 'paused' && interpreterRef.current) {
-      await interpreterRef.current.step();
-      setInterpreterState(interpreterRef.current.getState());
-      return;
-    }
-    
-    // If idle and no interpreter, create one
-    if (!interpreterRef.current && executionState === 'idle') {
-      // Create new interpreter if needed
-      terminalRef.current?.reset();
-      const interpreter = createInterpreter();
-      setInterpreterState(interpreter.getState());
+    if (executionState === 'running' || isStepping) return;
+
+    let interpreter = interpreterRef.current;
+    if (executionState === 'idle' || !interpreter) {
+      interpreter = createInterpreter();
+      if (!interpreter) return;
     }
 
-    if (interpreterRef.current && executionState !== 'running') {
-      await interpreterRef.current.step();
-      setInterpreterState(interpreterRef.current.getState());
-    }
-  }, [executionState, createInterpreter]);
+    setExecutionState('paused');
+    setIsStepping(true);
+    await interpreter.step();
 
-  // Calculate current line in editor
-  const getCurrentLine = useCallback(() => {
-    if (!interpreterState) {
-      return undefined;
-    }
-    
-    const lines = code.split('\n');
-    let charCount = 0;
-    
-    for (let i = 0; i < lines.length; i++) {
-      if (charCount + lines[i].length >= interpreterState.programCounter) {
-        return i;
-      }
-      charCount += lines[i].length + 1; // +1 for newline
-    }
-    
-    return 0;
-  }, [code, interpreterState]);
+    if (interpreterRef.current !== interpreter) return;
+    setIsStepping(false);
+    const state = interpreter.getState();
+    setInterpreterState(state);
+    if (state.isDone) setExecutionState('idle');
+  }, [executionState, isStepping, createInterpreter]);
+
+  const isSessionActive = executionState !== 'idle';
 
   return (
     <div className="h-screen flex flex-col bg-background">
@@ -207,13 +146,18 @@ function App() {
       <div className="flex-1 flex overflow-hidden">
         {/* Code Editor */}
         <div className="w-1/2 p-4 flex flex-col min-h-0">
-          <h2 className="text-sm font-semibold mb-2">Code Editor</h2>
+          <h2 className="text-sm font-semibold mb-2">
+            Code Editor
+            {isSessionActive && (
+              <span className="ml-2 font-normal text-muted-foreground">(read-only while running, Reset to edit)</span>
+            )}
+          </h2>
           <div className="flex-1 min-h-0">
             <CodeEditor
               value={code}
               onChange={handleCodeChange}
-              currentLine={getCurrentLine()}
-              currentCharIndex={interpreterState?.programCounter}
+              currentCharIndex={isSessionActive ? interpreterState?.programCounter : undefined}
+              readOnly={isSessionActive}
             />
           </div>
         </div>
@@ -243,6 +187,7 @@ function App() {
             <Button
               onClick={handleStart}
               variant="default"
+              disabled={isStepping}
               className="flex items-center gap-2"
             >
               <Play className="h-4 w-4" />
@@ -262,7 +207,7 @@ function App() {
           <Button
             onClick={handleStep}
             variant="outline"
-            disabled={executionState === 'running'}
+            disabled={executionState === 'running' || isStepping}
             className="flex items-center gap-2"
           >
             <StepForward className="h-4 w-4" />

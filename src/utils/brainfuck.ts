@@ -3,16 +3,27 @@ export interface BrainfuckState {
   pointer: number;
   programCounter: number;
   output: string;
-  input: string;
-  inputIndex: number;
-  isRunning: boolean;
+  isDone: boolean;
   isPaused: boolean;
 }
 
+const COMMANDS = new Set(['>', '<', '+', '-', '.', ',', '[', ']']);
+
+// How long run() executes synchronously before yielding to the UI
+const TIME_SLICE_MS = 16;
+
 export class BrainfuckInterpreter {
-  private state: BrainfuckState;
   private program: string;
-  private loopStack: number[] = [];
+  private jumps: Map<number, number>;
+  private memory: Uint8Array;
+  private pointer = 0;
+  private programCounter = 0;
+  private output = '';
+  private input = '';
+  private inputIndex = 0;
+  private isPaused = false;
+  private isHalted = false;
+  private isBusy = false;
   private onOutput?: (char: string) => void;
   private onInputRequest?: () => Promise<string>;
 
@@ -23,138 +34,174 @@ export class BrainfuckInterpreter {
     onInputRequest?: () => Promise<string>
   ) {
     this.program = program;
+    this.jumps = BrainfuckInterpreter.matchBrackets(program);
+    this.memory = new Uint8Array(memorySize);
     this.onOutput = onOutput;
     this.onInputRequest = onInputRequest;
-    this.state = {
-      memory: new Uint8Array(memorySize),
-      pointer: 0,
-      programCounter: 0,
-      output: "",
-      input: "",
-      inputIndex: 0,
-      isRunning: false,
-      isPaused: false,
-    };
+    this.skipToCommand();
+  }
+
+  // Maps each bracket's index to its partner's, or throws on a mismatch
+  static matchBrackets(program: string): Map<number, number> {
+    const jumps = new Map<number, number>();
+    const stack: number[] = [];
+    for (let i = 0; i < program.length; i++) {
+      if (program[i] === '[') {
+        stack.push(i);
+      } else if (program[i] === ']') {
+        const open = stack.pop();
+        if (open === undefined) {
+          throw new SyntaxError(`Unmatched ']' at ${describePosition(program, i)}`);
+        }
+        jumps.set(open, i);
+        jumps.set(i, open);
+      }
+    }
+    if (stack.length > 0) {
+      throw new SyntaxError(`Unmatched '[' at ${describePosition(program, stack[stack.length - 1])}`);
+    }
+    return jumps;
+  }
+
+  get isDone(): boolean {
+    return this.isHalted || this.programCounter >= this.program.length;
   }
 
   getState(): BrainfuckState {
-    return { ...this.state };
+    return {
+      memory: this.memory,
+      pointer: this.pointer,
+      programCounter: this.programCounter,
+      output: this.output,
+      isDone: this.isDone,
+      isPaused: this.isPaused,
+    };
   }
 
-  reset() {
-    this.state.memory.fill(0);
-    this.state.pointer = 0;
-    this.state.programCounter = 0;
-    this.state.output = "";
-    this.state.input = "";
-    this.state.inputIndex = 0;
-    this.state.isRunning = false;
-    this.state.isPaused = false;
-    this.loopStack = [];
-  }
-
-  async step(): Promise<boolean> {
-    if (this.state.programCounter >= this.program.length) {
-      this.state.isRunning = false;
-      return false;
-    }
-
-    const instruction = this.program[this.state.programCounter];
+  // Executes one instruction. Returns a promise only when waiting on input.
+  private exec(): void | Promise<void> {
+    const instruction = this.program[this.programCounter];
 
     switch (instruction) {
       case '>':
-        this.state.pointer = (this.state.pointer + 1) % this.state.memory.length;
+        this.pointer = (this.pointer + 1) % this.memory.length;
         break;
-      
+
       case '<':
-        this.state.pointer = (this.state.pointer - 1 + this.state.memory.length) % this.state.memory.length;
+        this.pointer = (this.pointer - 1 + this.memory.length) % this.memory.length;
         break;
-      
+
       case '+':
-        this.state.memory[this.state.pointer] = (this.state.memory[this.state.pointer] + 1) % 256;
+        this.memory[this.pointer]++;
         break;
-      
+
       case '-':
-        this.state.memory[this.state.pointer] = (this.state.memory[this.state.pointer] - 1 + 256) % 256;
+        this.memory[this.pointer]--;
         break;
-      
-      case '.':
-        {
-          const outputChar = String.fromCharCode(this.state.memory[this.state.pointer]);
-          this.state.output += outputChar;
-          if (this.onOutput) {
-            this.onOutput(outputChar);
-          }
-        }
+
+      case '.': {
+        const outputChar = String.fromCharCode(this.memory[this.pointer]);
+        this.output += outputChar;
+        this.onOutput?.(outputChar);
         break;
-      
+      }
+
       case ',':
-        if (this.onInputRequest && this.state.inputIndex >= this.state.input.length) {
-          const newInput = await this.onInputRequest();
-          this.state.input += newInput;
+        if (this.inputIndex >= this.input.length && this.onInputRequest) {
+          return this.onInputRequest().then((newInput) => {
+            this.input += newInput;
+            this.readInput();
+            this.advance();
+          });
         }
-        
-        if (this.state.inputIndex < this.state.input.length) {
-          this.state.memory[this.state.pointer] = this.state.input.charCodeAt(this.state.inputIndex);
-          this.state.inputIndex++;
-        } else {
-          this.state.memory[this.state.pointer] = 0;
-        }
+        this.readInput();
         break;
-      
+
       case '[':
-        if (this.state.memory[this.state.pointer] === 0) {
-          // Jump to matching ]
-          let depth = 1;
-          let i = this.state.programCounter + 1;
-          while (i < this.program.length && depth > 0) {
-            if (this.program[i] === '[') depth++;
-            else if (this.program[i] === ']') depth--;
-            i++;
-          }
-          this.state.programCounter = i - 1;
-        } else {
-          this.loopStack.push(this.state.programCounter);
+        if (this.memory[this.pointer] === 0) {
+          this.programCounter = this.jumps.get(this.programCounter)!;
         }
         break;
-      
+
       case ']':
-        if (this.state.memory[this.state.pointer] !== 0) {
-          // Jump back to matching [
-          this.state.programCounter = this.loopStack[this.loopStack.length - 1];
-        } else {
-          this.loopStack.pop();
+        if (this.memory[this.pointer] !== 0) {
+          this.programCounter = this.jumps.get(this.programCounter)!;
         }
         break;
     }
 
-    this.state.programCounter++;
-    return true;
+    this.advance();
   }
 
-  async run() {
-    this.state.isRunning = true;
-    this.state.isPaused = false;
-    
-    while (this.state.isRunning && !this.state.isPaused) {
-      const canContinue = await this.step();
-      if (!canContinue) {
-        this.state.isRunning = false;
+  private readInput() {
+    // EOF leaves 0 in the cell
+    this.memory[this.pointer] =
+      this.inputIndex < this.input.length ? this.input.charCodeAt(this.inputIndex++) : 0;
+  }
+
+  private advance() {
+    this.programCounter++;
+    this.skipToCommand();
+  }
+
+  // Moves past comments so programCounter always rests on a real instruction
+  private skipToCommand() {
+    while (this.programCounter < this.program.length && !COMMANDS.has(this.program[this.programCounter])) {
+      this.programCounter++;
+    }
+  }
+
+  // Executes one instruction. Returns false if nothing ran (finished, or already busy).
+  async step(): Promise<boolean> {
+    if (this.isBusy || this.isDone) return false;
+    this.isBusy = true;
+    try {
+      await this.exec();
+      return true;
+    } finally {
+      this.isBusy = false;
+    }
+  }
+
+  // Runs until finished, paused, or halted, calling onUpdate each time it yields to the UI
+  async run(onUpdate?: () => void) {
+    this.isPaused = false;
+    // A loop is already active (e.g. waiting on input); un-pausing lets it continue
+    if (this.isBusy) return;
+
+    this.isBusy = true;
+    try {
+      while (!this.isDone && !this.isPaused) {
+        const sliceEnd = performance.now() + TIME_SLICE_MS;
+        while (!this.isDone && !this.isPaused && performance.now() < sliceEnd) {
+          // Check the clock every 1000 instructions to keep the hot loop cheap
+          for (let i = 0; i < 1000 && !this.isDone && !this.isPaused; i++) {
+            const pending = this.exec();
+            if (pending) {
+              onUpdate?.();
+              await pending;
+            }
+          }
+        }
+        onUpdate?.();
+        await new Promise((resolve) => setTimeout(resolve, 0));
       }
-      
-      // Allow UI to update between steps
-      await new Promise(resolve => setTimeout(resolve, 0));
+    } finally {
+      this.isBusy = false;
     }
   }
 
   pause() {
-    this.state.isPaused = true;
+    this.isPaused = true;
   }
 
-  async resume() {
-    if (this.state.isPaused) {
-      this.state.isPaused = false;
-      return this.run();
-    }
+  // Stops execution permanently; any active run loop exits at its next check
+  halt() {
+    this.isHalted = true;
   }
-} 
+}
+
+function describePosition(program: string, index: number): string {
+  const before = program.slice(0, index).split('\n');
+  return `line ${before.length}, column ${before[before.length - 1].length + 1}`;
+}

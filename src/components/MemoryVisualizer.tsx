@@ -11,7 +11,6 @@ export const MemoryVisualizer: React.FC<MemoryVisualizerProps> = ({
   pointer
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [visibleCells, setVisibleCells] = useState(20);
 
   // Calculate how many cells can fit in the container width
@@ -47,30 +46,13 @@ export const MemoryVisualizer: React.FC<MemoryVisualizerProps> = ({
   const adjustedStartIndex = Math.max(0, endIndex - visibleCells);
   const visibleMemory = Array.from(memory.slice(adjustedStartIndex, endIndex));
 
-  // Auto-scroll to keep pointer in view when it changes
-  useEffect(() => {
-    if (scrollContainerRef.current) {
-      const pointerElement = scrollContainerRef.current.querySelector(`[data-index="${pointer}"]`);
-      if (pointerElement) {
-        pointerElement.scrollIntoView({
-          behavior: 'smooth',
-          block: 'nearest',
-          inline: 'center'
-        });
-      }
-    }
-  }, [pointer, visibleCells]);
-
   return (
     <div ref={containerRef} className="bg-muted border rounded-md p-4">
       <div className="mb-2 text-sm font-medium text-foreground">
         Memory Visualization (Pointer at: {pointer})
       </div>
-      <div 
-        ref={scrollContainerRef}
-        className="overflow-x-auto"
-      >
-        <div className="flex gap-1 min-w-max justify-center">
+      <div className="overflow-x-auto">
+        <div className="flex gap-1 min-w-max justify-center pt-3">
           {visibleMemory.map((value, index) => {
             const actualIndex = adjustedStartIndex + index;
             const isPointer = actualIndex === pointer;
@@ -86,8 +68,8 @@ export const MemoryVisualizer: React.FC<MemoryVisualizerProps> = ({
               >
                 {/* Pointer indicator */}
                 {isPointer && (
-                  <div className="absolute -top-6 left-1/2 transform -translate-x-1/2">
-                    <div className="w-0 h-0 border-l-[6px] border-l-transparent border-r-[6px] border-r-transparent border-t-[8px] border-t-black" />
+                  <div className="absolute -top-3 left-1/2 transform -translate-x-1/2">
+                    <div className="w-0 h-0 border-l-[6px] border-l-transparent border-r-[6px] border-r-transparent border-t-[8px] border-t-foreground" />
                   </div>
                 )}
                 
@@ -95,7 +77,7 @@ export const MemoryVisualizer: React.FC<MemoryVisualizerProps> = ({
                 <div
                   className={cn(
                     "w-12 h-12 flex items-center justify-center font-mono text-sm border-2 rounded",
-                    isPointer ? "border-black bg-accent" : "border-border bg-card",
+                    isPointer ? "border-foreground bg-accent" : "border-border bg-card",
                     value > 0 && "font-bold"
                   )}
                 >
